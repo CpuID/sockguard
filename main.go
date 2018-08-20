@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/buildkite/sockguard/socketproxy"
@@ -33,6 +34,7 @@ func main() {
 	allowBind := flag.String("allow-bind", "", "A path to allow host binds to occur under")
 	allowHostModeNetworking := flag.Bool("allow-host-mode-networking", false, "Allow containers to run with --net host")
 	cgroupParent := flag.String("cgroup-parent", "", "Set CgroupParent to an arbitrary value on new containers")
+	user := flag.String("user", "", "Forces --user on containers")
 	flag.Parse()
 
 	if debug {
@@ -62,7 +64,7 @@ func main() {
 	var allowBinds []string
 
 	if *allowBind != "" {
-		allowBinds = []string{*allowBind}
+		allowBinds = strings.Split(*allowBind, ",")
 	}
 
 	if *cgroupParent != "" {
@@ -73,7 +75,8 @@ func main() {
 		AllowBinds:              allowBinds,
 		AllowHostModeNetworking: *allowHostModeNetworking,
 		ContainerCgroupParent:   *cgroupParent,
-		Owner: *owner,
+		Owner:                   *owner,
+		User:                    *user,
 		Client: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
