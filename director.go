@@ -89,7 +89,7 @@ func (r *rulesDirector) Direct(l socketproxy.Logger, req *http.Request, upstream
 
 	// Build related endpoints
 	case match(`POST`, `^/build$`):
-		return r.addLabelsToQueryStringLabels(l, req, upstream)
+		return r.handleBuild(l, req, upstream)
 
 	// Image related endpoints
 	case match(`GET`, `^/images/json$`):
@@ -176,6 +176,7 @@ func (r *rulesDirector) checkOwner(l socketproxy.Logger, kind string, allowEmpty
 	for _, re := range identifierPatterns {
 		if m := re.FindStringSubmatch(path); len(m) > 0 {
 			identifier = m[1]
+			break
 		}
 	}
 
@@ -246,18 +247,22 @@ func (r *rulesDirector) handleContainerCreate(l socketproxy.Logger, req *http.Re
 			return
 		}
 
-		// apply CgroupParent if enabled
+		cgroupParent, ok := decoded["HostConfig"].(map[string]interface{})["CgroupParent"].(string)
+		if ok == false {
+			l.Printf("Denied container create: failed to cast CgroupParent to string")
+			writeError(w, "Denied container create: failed to cast CgroupParent to string", http.StatusBadRequest)
+			return
+		}
+		// Prevent setting a CgroupParent if flag is disabled, for host safety
+		if cgroupParent != "" {
+			l.Printf("Denied requested CgroupParent '%s' on container create (flag disabled)", cgroupParent)
+			writeError(w, fmt.Sprintf("Containers aren't allowed to set their own CgroupParent (received '%s')", cgroupParent), http.StatusUnauthorized)
+			return
+		}
+		// Apply the specified CgroupParent, if flag enabled
 		if r.ContainerCgroupParent != "" {
-			// If a CgroupParent is already specified, bug out
-			cgroupParent, ok := decoded["HostConfig"].(map[string]interface{})["CgroupParent"].(string)
-			if ok {
-				if cgroupParent != "" {
-					l.Printf("Denied container create due to existing CgroupParent '%s' (override not permitted)", cgroupParent)
-					writeError(w, fmt.Sprintf("Cannot override CgroupParent value '%s' on container create", cgroupParent), http.StatusUnauthorized)
-					return
-				}
-				decoded["HostConfig"].(map[string]interface{})["CgroupParent"] = r.ContainerCgroupParent
-			}
+			l.Printf("Applied CgroupParent '%s'", cgroupParent)
+			decoded["HostConfig"].(map[string]interface{})["CgroupParent"] = r.ContainerCgroupParent
 		}
 
 		// force user
@@ -382,30 +387,44 @@ func (r *rulesDirector) addLabelsToQueryStringFilters(l socketproxy.Logger, req 
 	})
 }
 
-func (r *rulesDirector) addLabelsToQueryStringLabels(l socketproxy.Logger, req *http.Request, upstream http.Handler) http.Handler {
+func (r *rulesDirector) handleBuild(l socketproxy.Logger, req *http.Request, upstream http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// Parse out query string to modify it
+		var q = req.URL.Query()
+
+		// Owner label
 		l.Printf("Adding label %s=%s to querystring: %s %s",
 			ownerKey, r.Owner, req.URL.Path, req.URL.RawQuery)
-
-		var q = req.URL.Query()
 		var labels = map[string]string{}
-
 		if encoded := q.Get("labels"); encoded != "" {
 			if err := json.NewDecoder(strings.NewReader(encoded)).Decode(&labels); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
-
 		labels[ownerKey] = r.Owner
-
 		encoded, err := json.Marshal(labels)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
 		q.Set("labels", string(encoded))
+
+		// CgroupParent
+		cgroupParent := q.Get("cgroupparent")
+		// Prevent setting a CgroupParent if flag is disabled, for host safety
+		if cgroupParent != "" {
+			l.Printf("Denied requested CgroupParent '%s' on build (flag disabled)", cgroupParent)
+			writeError(w, fmt.Sprintf("Image builds aren't allowed to set their own CgroupParent (received '%s')", cgroupParent), http.StatusUnauthorized)
+			return
+		}
+		// Apply the specified CgroupParent, if flag enabled
+		if r.ContainerCgroupParent != "" {
+			l.Printf("Applied CgroupParent '%s' to image build", cgroupParent)
+			q.Set("cgroupparent", r.ContainerCgroupParent)
+		}
+
+		// Rebuild the query string ready to forward request
 		req.URL.RawQuery = q.Encode()
 
 		upstream.ServeHTTP(w, req)
